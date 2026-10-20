@@ -18,6 +18,14 @@ interface UpstreamStreamResponse {
   success: boolean;
   provider?: string;
   sources?: UpstreamStreamSource[];
+  subtitles?: {
+    url: string;
+    label: string;
+    lang: string;
+    language?: string;
+    format?: string;
+    source?: string;
+  }[];
 }
 
 /**
@@ -82,6 +90,7 @@ export class PlaybackResolver {
 
     const directSources: StreamSource[] = [];
     let directIsHealthy = false;
+    let resolvedSubtitles: { url: string; label: string; lang: string }[] = [];
 
     // 1. Attempt direct HLS stream resolution from upstream backend cluster
     for (const base of BACKEND_POOLS) {
@@ -109,6 +118,14 @@ export class PlaybackResolver {
 
         if (res.ok) {
           const data: UpstreamStreamResponse = await res.json();
+          if (Array.isArray(data.subtitles) && data.subtitles.length > 0) {
+            resolvedSubtitles = data.subtitles.map((sub) => ({
+              url: sub.url,
+              label: sub.label || sub.language || sub.lang,
+              lang: sub.lang || 'en',
+            }));
+          }
+
           if (data.success && Array.isArray(data.sources) && data.sources.length > 0) {
             for (let idx = 0; idx < data.sources.length; idx++) {
               const s = data.sources[idx];
@@ -126,6 +143,7 @@ export class PlaybackResolver {
                   isAdFree: true,
                   supportsProgressTracking: true,
                   isAuthorizedDemo: false,
+                  subtitles: resolvedSubtitles,
                 });
               }
             }
@@ -270,6 +288,7 @@ export class PlaybackResolver {
       isPlayable: true,
       activeSource: availableSources[0],
       availableSources,
+      subtitles: resolvedSubtitles,
     };
   }
 }

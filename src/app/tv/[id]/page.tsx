@@ -4,6 +4,8 @@ import { notFound } from 'next/navigation';
 import { MediaProvider } from '@/lib/mediaProvider';
 import { Play, Star, Calendar, Layers } from 'lucide-react';
 import MediaCard from '@/components/MediaCard';
+import TrailerModal from '@/components/TrailerModal';
+import CastCarousel from '@/components/CastCarousel';
 
 interface Props {
   params: Promise<{ id: string }>;
@@ -78,7 +80,7 @@ export default async function TVDetailPage({ params }: Props) {
               ))}
             </div>
 
-            <div className="pt-4">
+            <div className="pt-4 flex items-center gap-3 flex-wrap">
               <Link
                 href={`/watch/${tv.id}?type=tv&season=1&episode=1`}
                 id="watch-tv-first-episode"
@@ -87,9 +89,17 @@ export default async function TVDetailPage({ params }: Props) {
                 <Play className="w-4 h-4 fill-white" />
                 Start Watching (S1:E1)
               </Link>
+              {tv.trailerYoutubeId && (
+                <TrailerModal youtubeId={tv.trailerYoutubeId} title={tv.title} />
+              )}
             </div>
           </div>
         </div>
+
+        {/* Cast & Characters */}
+        {tv.cast && tv.cast.length > 0 && (
+          <CastCarousel cast={tv.cast} />
+        )}
 
         {/* Episode List Section */}
         {episodes.length > 0 && (

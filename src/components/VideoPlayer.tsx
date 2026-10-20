@@ -21,8 +21,10 @@ import {
   ExternalLink,
   Info,
   Loader2,
+  Subtitles,
+  PictureInPicture,
 } from 'lucide-react';
-import { StreamSource, MediaItem, PlaybackResolution } from '@/lib/types';
+import { StreamSource, MediaItem, PlaybackResolution, SubtitleTrack } from '@/lib/types';
 import { saveWatchProgress, getProgressForMedia, resetProgress } from '@/lib/storage';
 
 type PlaybackState = 'resolving' | 'loading' | 'ready' | 'playing' | 'buffering' | 'failed';
@@ -67,6 +69,11 @@ export default function VideoPlayer({
   const [showCountdown, setShowCountdown] = useState(false);
   const [countdownSeconds, setCountdownSeconds] = useState(5);
   const [needsClickToPlay, setNeedsClickToPlay] = useState(false);
+  const [showSubtitleMenu, setShowSubtitleMenu] = useState(false);
+  const [activeSubtitleIndex, setActiveSubtitleIndex] = useState<number>(-1); // -1 = Off
+  const [availableSubtitles, setAvailableSubtitles] = useState<SubtitleTrack[]>(
+    activeSource?.subtitles || resolution.subtitles || []
+  );
 
   // Resume prompt state
   const [showResumeModal, setShowResumeModal] = useState(false);
@@ -397,6 +404,36 @@ export default function VideoPlayer({
     videoRef.current.currentTime = Math.max(0, Math.min(duration, videoRef.current.currentTime + offset));
   };
 
+  const togglePiP = async () => {
+    if (!videoRef.current) return;
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else if (document.pictureInPictureEnabled) {
+        await videoRef.current.requestPictureInPicture();
+      }
+    } catch {
+      // Ignored if PiP is unsupported or denied
+    }
+  };
+
+  const handleSelectSubtitle = (index: number) => {
+    setActiveSubtitleIndex(index);
+    setShowSubtitleMenu(false);
+    if (!videoRef.current) return;
+    const tracks = videoRef.current.textTracks;
+    for (let i = 0; i < tracks.length; i++) {
+      tracks[i].mode = i === index ? 'showing' : 'disabled';
+    }
+  };
+
+  // Sync available subtitles whenever activeSource changes
+  useEffect(() => {
+    const subs = activeSource?.subtitles || resolution.subtitles || [];
+    setAvailableSubtitles(subs);
+    setActiveSubtitleIndex(-1);
+  }, [activeSource, resolution.subtitles]);
+
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
     if (!document.fullscreenElement) {
@@ -436,21 +473,46 @@ export default function VideoPlayer({
       className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden shadow-2xl border border-white/10 select-none group focus:outline-none"
       tabIndex={0}
       onKeyDown={(e) => {
-        if (e.key === ' ' || e.key === 'k') {
+        // Prevent interfering if an input is somehow focused
+        if (['input', 'textarea', 'select'].includes((e.target as HTMLElement)?.tagName?.toLowerCase())) return;
+
+        if (e.key === ' ' || e.key === 'k' || e.key === 'K') {
           e.preventDefault();
           togglePlay();
-        } else if (e.key === 'ArrowRight') {
+        } else if (e.key === 'ArrowRight' || e.key === 'l' || e.key === 'L') {
           e.preventDefault();
           skipTime(10);
-        } else if (e.key === 'ArrowLeft') {
+        } else if (e.key === 'ArrowLeft' || e.key === 'j' || e.key === 'J') {
           e.preventDefault();
           skipTime(-10);
-        } else if (e.key === 'f') {
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          handleVolumeChange({ target: { value: Math.min(1, volume + 0.1) } } as any);
+        } else if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          handleVolumeChange({ target: { value: Math.max(0, volume - 0.1) } } as any);
+        } else if (e.key >= '0' && e.key <= '9') {
+          // Number keys 0-9 seek to 0%, 10%, 20% ... 90%
+          e.preventDefault();
+          const targetPct = parseInt(e.key, 10) / 10;
+          if (duration > 0 && videoRef.current) {
+            videoRef.current.currentTime = duration * targetPct;
+            setCurrentTime(duration * targetPct);
+          }
+        } else if (e.key === 'f' || e.key === 'F') {
           e.preventDefault();
           toggleFullscreen();
-        } else if (e.key === 'm') {
+        } else if (e.key === 'm' || e.key === 'M') {
           e.preventDefault();
           toggleMute();
+        } else if (e.key === 'p' || e.key === 'P') {
+          e.preventDefault();
+          togglePiP();
+        } else if (e.key === 'c' || e.key === 'C') {
+          e.preventDefault();
+          if (availableSubtitles.length > 0) {
+            handleSelectSubtitle(activeSubtitleIndex === -1 ? 0 : -1);
+          }
         }
       }}
     >
@@ -535,13 +597,14 @@ export default function VideoPlayer({
         )}
       </div>
 
-      {/* Embedded Player (Iframe) */}
+      {/* Embedded Player (Iframe) with pop-up/redirect isolation */}
       {activeSource && activeSource.type === 'embed' && (
         <iframe
           ref={iframeRef}
           src={activeSource.url}
           title={media.title}
           className="w-full h-full border-0"
+          sandbox="allow-scripts allow-same-origin allow-forms"
           allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
           allowFullScreen
         />
@@ -565,7 +628,19 @@ export default function VideoPlayer({
           onTimeUpdate={handleTimeUpdate}
           className="w-full h-full object-contain cursor-pointer"
           playsInline
-        />
+          crossOrigin="anonymous"
+        >
+          {availableSubtitles.map((sub, idx) => (
+            <track
+              key={`${sub.lang}-${idx}`}
+              kind="subtitles"
+              src={sub.url}
+              srcLang={sub.lang || 'en'}
+              label={sub.label}
+              default={idx === activeSubtitleIndex}
+            />
+          ))}
+        </video>
       )}
 
       {/* Autoplay blocked: 'Click to play' action */}
@@ -878,12 +953,72 @@ export default function VideoPlayer({
                   </div>
                 )}
 
+                {/* Subtitles / CC Menu */}
+                {availableSubtitles.length > 0 && (
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setShowSubtitleMenu(!showSubtitleMenu)}
+                      aria-label="Closed Captions / Subtitles"
+                      title="Subtitles (C)"
+                      className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded transition-colors ${
+                        activeSubtitleIndex !== -1
+                          ? 'bg-cyan-500 text-slate-950 font-bold'
+                          : 'bg-white/10 hover:bg-white/20 text-white font-medium'
+                      }`}
+                    >
+                      <Subtitles className="w-3.5 h-3.5" />
+                      <span>{activeSubtitleIndex === -1 ? 'CC' : availableSubtitles[activeSubtitleIndex]?.lang?.toUpperCase() || 'CC'}</span>
+                    </button>
+
+                    {showSubtitleMenu && (
+                      <div className="absolute right-0 bottom-8 z-30 p-2 rounded-xl glass-panel w-48 max-h-56 overflow-y-auto space-y-1 shadow-2xl border border-white/15">
+                        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 px-2">
+                          Subtitles
+                        </div>
+                        <button
+                          onClick={() => handleSelectSubtitle(-1)}
+                          className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors ${
+                            activeSubtitleIndex === -1 ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-300 hover:bg-white/10'
+                          }`}
+                        >
+                          Off
+                        </button>
+                        {availableSubtitles.map((sub, idx) => (
+                          <button
+                            key={`${sub.lang}-${idx}`}
+                            onClick={() => handleSelectSubtitle(idx)}
+                            className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors flex items-center justify-between ${
+                              activeSubtitleIndex === idx ? 'bg-cyan-500/20 text-cyan-300 font-semibold' : 'text-slate-300 hover:bg-white/10'
+                            }`}
+                          >
+                            <span className="truncate">{sub.label}</span>
+                            <span className="text-[10px] text-slate-400 font-mono uppercase ml-1 flex-shrink-0">{sub.lang}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Picture in Picture (PiP) */}
+                <button
+                  type="button"
+                  onClick={togglePiP}
+                  aria-label="Picture in Picture"
+                  title="Picture in Picture (P)"
+                  className="p-1.5 text-slate-300 hover:text-white transition-colors hidden sm:block"
+                >
+                  <PictureInPicture className="w-4 h-4" />
+                </button>
+
                 {/* Fullscreen */}
                 <button
                   type="button"
                   onClick={toggleFullscreen}
                   id="player-fullscreen-btn"
                   aria-label={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
+                  title="Fullscreen (F)"
                   className="p-1.5 text-slate-300 hover:text-white transition-colors"
                 >
                   {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}

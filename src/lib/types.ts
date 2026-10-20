@@ -1,3 +1,10 @@
+export interface MediaCast {
+  id: number | string;
+  name: string;
+  character?: string;
+  profilePath?: string;
+}
+
 export interface MediaItem {
   id: string;
   title: string;
@@ -12,6 +19,8 @@ export interface MediaItem {
   seasonsCount?: number;
   totalEpisodes?: number;
   isFeatured?: boolean;
+  trailerYoutubeId?: string;
+  cast?: MediaCast[];
 }
 
 export interface Episode {
@@ -25,6 +34,15 @@ export interface Episode {
   airDate?: string;
 }
 
+export interface SubtitleTrack {
+  url: string;
+  label: string;
+  lang: string;
+  language?: string;
+  format?: string;
+  source?: string;
+}
+
 export interface StreamSource {
   id: string;
   name: string;
@@ -35,6 +53,7 @@ export interface StreamSource {
   isAdFree?: boolean;
   supportsProgressTracking?: boolean;
   isAuthorizedDemo?: boolean;
+  subtitles?: SubtitleTrack[];
 }
 
 export interface PlaybackResolution {
@@ -45,6 +64,7 @@ export interface PlaybackResolution {
   isPlayable: boolean;
   activeSource: StreamSource | null;
   availableSources: StreamSource[];
+  subtitles?: SubtitleTrack[];
   unavailabilityReason?: string;
 }
 

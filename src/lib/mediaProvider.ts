@@ -95,6 +95,9 @@ export interface FramexRawItem {
   genre_ids?: number[];
   duration?: string;
   number_of_seasons?: number;
+  cast?: { id: number; name: string; character?: string; profile?: string; profile_path?: string }[];
+  trailers?: { key?: string; site?: string; type?: string; name?: string }[];
+  videos?: { key?: string; site?: string; type?: string; name?: string }[];
 }
 
 export interface FramexHomeResponse {
@@ -152,6 +155,22 @@ export function normalizeItem(raw: FramexRawItem, fallbackType: 'movie' | 'tv' |
   const posterImg = raw.poster || raw.image || 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=800&auto=format&fit=crop&q=80';
   const backdropImg = raw.backdrop || posterImg;
 
+  // Extract cast
+  const castList = Array.isArray(raw.cast)
+    ? raw.cast.slice(0, 10).map((c) => ({
+        id: c.id,
+        name: c.name,
+        character: c.character,
+        profilePath: c.profile || c.profile_path,
+      }))
+    : undefined;
+
+  // Extract official trailer key
+  const trailerItem = (raw.trailers || raw.videos || []).find(
+    (v) => (v.site === 'YouTube' || !v.site) && (v.type === 'Trailer' || v.type === 'Teaser') && v.key
+  );
+  const trailerKey = trailerItem?.key;
+
   return {
     id: idStr,
     title: titleStr,
@@ -165,6 +184,8 @@ export function normalizeItem(raw: FramexRawItem, fallbackType: 'movie' | 'tv' |
     genres: genresList,
     seasonsCount: raw.number_of_seasons,
     isFeatured: false,
+    cast: castList,
+    trailerYoutubeId: trailerKey,
   };
 }
 

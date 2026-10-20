@@ -1,7 +1,11 @@
 import React, { Suspense } from 'react';
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import Navbar from '@/components/Navbar';
+
+export const viewport: Viewport = {
+  themeColor: '#07090e',
+};
 
 export const metadata: Metadata = {
   title: 'FJL TV | Modern Cinematic Streaming Experience',
@@ -14,6 +18,7 @@ export const metadata: Metadata = {
     siteName: 'FJL TV',
     type: 'website',
   },
+  manifest: '/manifest.json',
   twitter: {
     card: 'summary_large_image',
     title: 'FJL TV - Modern Streaming Platform',

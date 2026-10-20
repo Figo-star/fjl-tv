@@ -4,6 +4,8 @@ import { notFound } from 'next/navigation';
 import { MediaProvider } from '@/lib/mediaProvider';
 import { Play, Star, Calendar, Clock, ShieldCheck } from 'lucide-react';
 import MediaCard from '@/components/MediaCard';
+import TrailerModal from '@/components/TrailerModal';
+import CastCarousel from '@/components/CastCarousel';
 
 interface Props {
   params: Promise<{ id: string }>;
@@ -86,8 +88,8 @@ export default async function MovieDetailPage({ params }: Props) {
               ))}
             </div>
 
-            {/* Play Button */}
-            <div className="pt-4">
+            {/* Play & Trailer Buttons */}
+            <div className="pt-4 flex items-center gap-3 flex-wrap">
               <Link
                 href={`/watch/${movie.id}?type=movie`}
                 id="watch-movie-button"
@@ -96,9 +98,17 @@ export default async function MovieDetailPage({ params }: Props) {
                 <Play className="w-4 h-4 fill-slate-950" />
                 Watch Movie Now
               </Link>
+              {movie.trailerYoutubeId && (
+                <TrailerModal youtubeId={movie.trailerYoutubeId} title={movie.title} />
+              )}
             </div>
           </div>
         </div>
+
+        {/* Cast & Characters */}
+        {movie.cast && movie.cast.length > 0 && (
+          <CastCarousel cast={movie.cast} />
+        )}
 
         {/* Recommendations */}
         {recommendations.length > 0 && (
