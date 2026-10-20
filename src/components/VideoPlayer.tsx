@@ -20,9 +20,12 @@ import {
   X,
   ExternalLink,
   Info,
+  Loader2,
 } from 'lucide-react';
 import { StreamSource, MediaItem, PlaybackResolution } from '@/lib/types';
 import { saveWatchProgress, getProgressForMedia, resetProgress } from '@/lib/storage';
+
+type PlaybackState = 'resolving' | 'loading' | 'ready' | 'playing' | 'buffering' | 'failed';
 
 interface VideoPlayerProps {
   media: MediaItem;
@@ -47,13 +50,13 @@ export default function VideoPlayer({
   const hlsRef = useRef<Hls | null>(null);
 
   const [activeSource, setActiveSource] = useState<StreamSource | null>(resolution.activeSource);
+  const [playbackState, setPlaybackState] = useState<PlaybackState>('loading');
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(0.9);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [hasError, setHasError] = useState(!resolution.isPlayable);
   const [errorMessage, setErrorMessage] = useState(resolution.unavailabilityReason || '');
   const [showControls, setShowControls] = useState(true);
   const [showServerPicker, setShowServerPicker] = useState(false);
@@ -63,13 +66,17 @@ export default function VideoPlayer({
   const [currentQuality, setCurrentQuality] = useState<number>(-1);
   const [showCountdown, setShowCountdown] = useState(false);
   const [countdownSeconds, setCountdownSeconds] = useState(5);
+  const [needsClickToPlay, setNeedsClickToPlay] = useState(false);
 
   // Resume prompt state
   const [showResumeModal, setShowResumeModal] = useState(false);
   const [savedResumeTime, setSavedResumeTime] = useState(0);
 
+  // Track failover attempts to prevent infinite retry loops
+  const failedSourceIdsRef = useRef<Set<string>>(new Set());
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const stallTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const formatTime = (secs: number) => {
     if (isNaN(secs) || secs < 0) return '0:00';
@@ -81,7 +88,6 @@ export default function VideoPlayer({
   // Check saved progress on mount or content change
   useEffect(() => {
     const saved = getProgressForMedia(media.id, media.mediaType, initialSeason, initialEpisode);
-    // Ignore negligible progress (< 15s) or near completed (> 95% of duration)
     if (saved && saved.timestamp >= 15) {
       if (!saved.duration || saved.timestamp < saved.duration * 0.95) {
         setSavedResumeTime(saved.timestamp);
@@ -92,10 +98,9 @@ export default function VideoPlayer({
     }
   }, [media.id, media.mediaType, initialSeason, initialEpisode]);
 
-  // Handle postMessage progress tracking from supported embed players (e.g., VidLink Pro)
+  // Handle postMessage progress tracking from supported embed players (e.g. VidLink Pro)
   useEffect(() => {
     const handleMessage = (e: MessageEvent) => {
-      // Validate trusted origins
       if (
         typeof e.origin === 'string' &&
         (e.origin.includes('vidlink.pro') || e.origin.includes('videasy.to'))
@@ -109,6 +114,8 @@ export default function VideoPlayer({
               if (cur > 0) {
                 setCurrentTime(cur);
                 if (dur > 0) setDuration(dur);
+                setPlaybackState('playing');
+                setIsPlaying(true);
                 saveWatchProgress({
                   mediaId: media.id,
                   mediaType: media.mediaType,
@@ -123,7 +130,7 @@ export default function VideoPlayer({
             }
           }
         } catch {
-          // Ignore unrelated or non-JSON messages
+          // Ignore non-json messages
         }
       }
     };
@@ -140,7 +147,8 @@ export default function VideoPlayer({
     setCurrentTime(curr);
     setDuration(dur);
 
-    // Save periodically
+    if (stallTimeoutRef.current) clearTimeout(stallTimeoutRef.current);
+
     if (Math.floor(curr) % 5 === 0 && dur > 0) {
       saveWatchProgress({
         mediaId: media.id,
@@ -154,7 +162,6 @@ export default function VideoPlayer({
       });
     }
 
-    // End of episode auto-countdown
     if (nextEpisodeUrl && dur > 30 && dur - curr <= 15 && !showCountdown) {
       setShowCountdown(true);
       setCountdownSeconds(10);
@@ -172,48 +179,54 @@ export default function VideoPlayer({
     }
   }, [media.id, media.mediaType, media.title, media.poster, initialSeason, initialEpisode, nextEpisodeUrl, showCountdown]);
 
-  // Save progress on pause or unmount
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      if (videoRef.current && videoRef.current.currentTime > 5) {
-        saveWatchProgress({
-          mediaId: media.id,
-          mediaType: media.mediaType,
-          title: media.title,
-          poster: media.poster,
-          seasonNumber: initialSeason,
-          episodeNumber: initialEpisode,
-          timestamp: Math.floor(videoRef.current.currentTime),
-          duration: Math.floor(videoRef.current.duration || 0),
-        });
-      }
-    };
+  // Handle fatal error and failover to next viable provider
+  const handleSourceFailure = useCallback(
+    (reason: string) => {
+      if (!activeSource) return;
+      console.warn(`Source failed [${activeSource.name}]:`, reason);
+      failedSourceIdsRef.current.add(activeSource.id);
 
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => {
-      handleBeforeUnload();
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-    };
-  }, [media.id, media.mediaType, media.title, media.poster, initialSeason, initialEpisode]);
+      // Look for next untried source
+      const nextSource = resolution.availableSources.find(
+        (s) => !failedSourceIdsRef.current.has(s.id)
+      );
+
+      if (nextSource) {
+        console.log(`Auto-switching to alternative server: ${nextSource.name}`);
+        setPlaybackState('loading');
+        setActiveSource(nextSource);
+      } else {
+        setPlaybackState('failed');
+        setErrorMessage(
+          'All playback servers for this title are currently unavailable or undergoing maintenance. Please select a server manually or retry later.'
+        );
+      }
+    },
+    [activeSource, resolution.availableSources]
+  );
 
   // Initialize playback on active source change
   useEffect(() => {
     if (!activeSource) {
-      setHasError(true);
+      setPlaybackState('failed');
       setErrorMessage(resolution.unavailabilityReason || 'Playback is currently unavailable for this title.');
       return;
     }
 
-    setHasError(false);
+    setPlaybackState('loading');
     setErrorMessage('');
     setQualities([]);
+    setNeedsClickToPlay(false);
 
-    // If source is an iframe embed, destroy HLS and let iframe handle display
+    if (stallTimeoutRef.current) clearTimeout(stallTimeoutRef.current);
+
+    // If source is an iframe embed
     if (activeSource.type === 'embed') {
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+      setPlaybackState('ready');
       return;
     }
 
@@ -227,17 +240,32 @@ export default function VideoPlayer({
 
     const streamUrl = activeSource.url;
 
+    // Set a bounded stall detector (6s): if neither play nor timeupdate fires, failover gracefully
+    stallTimeoutRef.current = setTimeout(() => {
+      if (activeSource.type === 'hls' && video.paused && video.currentTime === 0) {
+        console.warn('Playback stalled on stream start; attempting failover...');
+        handleSourceFailure('Stream stalled on buffer attach');
+      }
+    }, 6000);
+
     if (activeSource.type === 'hls') {
       if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: true,
+          manifestLoadingTimeOut: 5000,
+          manifestLoadingMaxRetry: 1,
+          levelLoadingTimeOut: 5000,
+          levelLoadingMaxRetry: 1,
+          fragLoadingTimeOut: 5000,
+          fragLoadingMaxRetry: 1,
         });
 
         hls.loadSource(streamUrl);
         hls.attachMedia(video);
 
         hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+          setPlaybackState('ready');
           setQualities(
             data.levels.map((lvl, index) => ({
               id: index,
@@ -245,33 +273,35 @@ export default function VideoPlayer({
               bitrate: lvl.bitrate,
             }))
           );
-          video.play().catch(() => setIsPlaying(false));
+
+          video.play().catch((err) => {
+            if (err.name === 'NotAllowedError') {
+              setNeedsClickToPlay(true);
+            }
+            setIsPlaying(false);
+          });
         });
 
         hls.on(Hls.Events.ERROR, (event, data) => {
           if (data.fatal) {
-            console.warn(`HLS fatal error on ${activeSource.name}:`, data.type, data.details);
-            // Automatic seamless failover to next provider if available
-            const currentIndex = resolution.availableSources.findIndex((s) => s.id === activeSource.id);
-            if (currentIndex !== -1 && currentIndex + 1 < resolution.availableSources.length) {
-              const nextSource = resolution.availableSources[currentIndex + 1];
-              console.log(`Failing over to ${nextSource.name}...`);
-              setActiveSource(nextSource);
-            } else {
-              setHasError(true);
-              setErrorMessage(`Playback error encountered on ${activeSource.name}. Please select an alternate stream server.`);
-            }
+            handleSourceFailure(`HLS fatal: ${data.type} - ${data.details}`);
           }
         });
 
         hlsRef.current = hls;
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = streamUrl;
-        video.play().catch(() => setIsPlaying(false));
+        video.play().catch((err) => {
+          if (err.name === 'NotAllowedError') setNeedsClickToPlay(true);
+          setIsPlaying(false);
+        });
       }
     } else {
       video.src = streamUrl;
-      video.play().catch(() => setIsPlaying(false));
+      video.play().catch((err) => {
+        if (err.name === 'NotAllowedError') setNeedsClickToPlay(true);
+        setIsPlaying(false);
+      });
     }
 
     return () => {
@@ -279,11 +309,10 @@ export default function VideoPlayer({
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
-      if (countdownIntervalRef.current) {
-        clearInterval(countdownIntervalRef.current);
-      }
+      if (stallTimeoutRef.current) clearTimeout(stallTimeoutRef.current);
+      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
     };
-  }, [activeSource, resolution.availableSources, resolution.unavailabilityReason]);
+  }, [activeSource, handleSourceFailure, resolution.unavailabilityReason]);
 
   // Resume Action: Restore to saved timestamp
   const handleResume = () => {
@@ -294,7 +323,6 @@ export default function VideoPlayer({
       videoRef.current.play().catch(() => {});
       setIsPlaying(true);
     } else if (activeSource?.type === 'embed' && iframeRef.current) {
-      // Send seek command to iframe if supported
       try {
         iframeRef.current.contentWindow?.postMessage(
           JSON.stringify({ type: 'SEEK', time: savedResumeTime }),
@@ -332,6 +360,7 @@ export default function VideoPlayer({
     if (videoRef.current.paused) {
       videoRef.current.play();
       setIsPlaying(true);
+      setNeedsClickToPlay(false);
     } else {
       videoRef.current.pause();
       setIsPlaying(false);
@@ -477,6 +506,7 @@ export default function VideoPlayer({
                     onClick={() => {
                       setActiveSource(s);
                       setShowServerPicker(false);
+                      failedSourceIdsRef.current.delete(s.id);
                     }}
                     className={`w-full text-left px-3 py-2.5 rounded-lg text-xs font-medium flex flex-col gap-0.5 transition-colors ${
                       activeSource && s.id === activeSource.id
@@ -522,12 +552,34 @@ export default function VideoPlayer({
         <video
           ref={videoRef}
           onClick={togglePlay}
-          onPlay={() => setIsPlaying(true)}
-          onPause={() => setIsPlaying(false)}
+          onPlay={() => {
+            setIsPlaying(true);
+            setPlaybackState('playing');
+          }}
+          onPause={() => {
+            setIsPlaying(false);
+            if (playbackState === 'playing') setPlaybackState('ready');
+          }}
+          onWaiting={() => setPlaybackState('buffering')}
+          onPlaying={() => setPlaybackState('playing')}
           onTimeUpdate={handleTimeUpdate}
           className="w-full h-full object-contain cursor-pointer"
           playsInline
         />
+      )}
+
+      {/* Autoplay blocked: 'Click to play' action */}
+      {needsClickToPlay && (
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
+          <button
+            type="button"
+            onClick={togglePlay}
+            className="flex items-center gap-3 px-6 py-3 rounded-full bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold shadow-2xl shadow-cyan-500/40 hover:scale-105 active:scale-95 transition-all"
+          >
+            <Play className="w-6 h-6 fill-slate-950" />
+            <span>Click to start playback</span>
+          </button>
+        </div>
       )}
 
       {/* Embedded Player Notice Banner (Bottom) */}
@@ -591,7 +643,7 @@ export default function VideoPlayer({
       )}
 
       {/* Honest Error / Unavailable State with Retry */}
-      {hasError && (
+      {playbackState === 'failed' && (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center p-6 bg-slate-950/95 backdrop-blur-md text-center">
           <AlertTriangle className="w-12 h-12 text-amber-400 mb-3" />
           <h3 className="text-lg font-bold text-white mb-1">Playback Error</h3>
@@ -600,7 +652,11 @@ export default function VideoPlayer({
             {resolution.availableSources.map((s) => (
               <button
                 key={s.id}
-                onClick={() => setActiveSource(s)}
+                onClick={() => {
+                  failedSourceIdsRef.current.clear();
+                  setActiveSource(s);
+                  setPlaybackState('loading');
+                }}
                 className={`px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
                   activeSource && s.id === activeSource.id
                     ? 'bg-cyan-500 text-slate-950'
@@ -643,6 +699,15 @@ export default function VideoPlayer({
             >
               <X className="w-3.5 h-3.5" />
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Buffering Indicator */}
+      {playbackState === 'buffering' && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+          <div className="p-3.5 rounded-full bg-black/75 backdrop-blur-md text-cyan-400 shadow-xl">
+            <Loader2 className="w-8 h-8 animate-spin" />
           </div>
         </div>
       )}

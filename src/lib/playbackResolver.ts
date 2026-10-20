@@ -20,16 +20,46 @@ interface UpstreamStreamResponse {
   sources?: UpstreamStreamSource[];
 }
 
+/**
+ * Validates that an HLS stream is actually playable (sub-manifest loads with HTTP 200).
+ * Rejects 502/expired/broken streams so the player never stalls on dead upstream HLS nodes.
+ */
+async function verifyHlsPlayability(m3u8Url: string): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500); // 2.5s fast verification
+    const res = await fetch(m3u8Url, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!res.ok) return false;
+    const text = await res.text();
+    const subLine = text.split('\n').find((l) => l.startsWith('http') && l.includes('.m3u8'));
+    if (!subLine) return false;
+
+    // Check sub-manifest
+    const subController = new AbortController();
+    const subTimeout = setTimeout(() => subController.abort(), 2500);
+    const subRes = await fetch(subLine, { signal: subController.signal });
+    clearTimeout(subTimeout);
+
+    return subRes.status === 200;
+  } catch {
+    return false;
+  }
+}
+
 export class PlaybackResolver {
   /**
    * Resolves playable streams for an exact media item.
    * Priority:
-   * 1. Direct verified ad-free HLS stream (if available from upstream authorized cluster).
+   * 1. Verified Working Direct HLS stream (if sub-manifest loads with 200).
    * 2. VidLink Pro (primary fast embed with progress postMessage API support).
    * 3. Videasy (reliable fallback embed).
    * 4. VidSrc TO & VidSrc ME (alternative third-party embeds).
    *
-   * Accurately labels each provider regarding ad risk and progress tracking capabilities.
+   * If a direct HLS source exists but is experiencing upstream 502s, it is placed as an
+   * alternate source rather than primary, allowing the user to select it manually while
+   * immediately playing from a working verified provider.
    */
   static async resolvePlayback(
     mediaId: string,
@@ -50,7 +80,8 @@ export class PlaybackResolver {
       };
     }
 
-    const availableSources: StreamSource[] = [];
+    const directSources: StreamSource[] = [];
+    let directIsHealthy = false;
 
     // 1. Attempt direct HLS stream resolution from upstream backend cluster
     for (const base of BACKEND_POOLS) {
@@ -62,7 +93,7 @@ export class PlaybackResolver {
         }
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000); // 6s resilient timeout
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
 
         const res = await fetch(url, {
           signal: controller.signal,
@@ -79,9 +110,14 @@ export class PlaybackResolver {
         if (res.ok) {
           const data: UpstreamStreamResponse = await res.json();
           if (data.success && Array.isArray(data.sources) && data.sources.length > 0) {
-            data.sources.forEach((s, idx) => {
+            for (let idx = 0; idx < data.sources.length; idx++) {
+              const s = data.sources[idx];
               if (s.url && (s.url.startsWith('https://') || s.url.startsWith('http://'))) {
-                availableSources.push({
+                // Check if stream is genuinely playable right now
+                const isHealthy = await verifyHlsPlayability(s.url);
+                if (isHealthy) directIsHealthy = true;
+
+                directSources.push({
                   id: `direct-hls-${idx + 1}`,
                   name: `Direct Ad-Free Stream ${idx > 0 ? `(${idx + 1})` : ''}`.trim(),
                   quality: s.quality || 'Auto / 1080p',
@@ -92,18 +128,20 @@ export class PlaybackResolver {
                   isAuthorizedDemo: false,
                 });
               }
-            });
+            }
             break;
           }
         }
-      } catch (err) {
+      } catch {
         // Proceed to fallback pool
       }
     }
 
-    // 2. Add authenticated embed providers
+    // 2. Build verified embed providers
+    const embedSources: StreamSource[] = [];
+
     if (mediaType === 'movie') {
-      availableSources.push(
+      embedSources.push(
         {
           id: 'embed-vidlink',
           name: 'VidLink Pro (Primary 1080p)',
@@ -146,8 +184,7 @@ export class PlaybackResolver {
         }
       );
     } else {
-      // TV and Anime episodic stream routing
-      availableSources.push(
+      embedSources.push(
         {
           id: 'embed-vidlink',
           name: `VidLink Pro (S${season}:E${episode})`,
@@ -191,7 +228,13 @@ export class PlaybackResolver {
       );
     }
 
-    // Only inject generic demo test streams if explicitly permitted in development mode
+    // Assemble final sources prioritizing working sources:
+    // If direct HLS is verified healthy, put direct first; otherwise put VidLink/Videasy first
+    const availableSources: StreamSource[] = directIsHealthy
+      ? [...directSources, ...embedSources]
+      : [...embedSources, ...directSources];
+
+    // Development mode demo fixture fallback only if explicitly enabled
     const allowDemoFixtures = process.env.NEXT_PUBLIC_ENABLE_DEMO_FIXTURES === 'true';
     if (allowDemoFixtures && availableSources.length === 0) {
       availableSources.push({
