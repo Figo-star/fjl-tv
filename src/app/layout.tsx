@@ -43,10 +43,10 @@ export default function RootLayout({
               <span>© 2026 All Rights Reserved.</span>
             </div>
             <div className="flex items-center gap-6">
-              <span className="text-slate-400">Authorized Demo & Media Stream Testing Portal</span>
+              <span className="text-slate-400">Ad-Free Cinematic Entertainment Portal</span>
               <span className="text-emerald-400 flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                Network Systems Operational
+                Ad-Free Network Active
               </span>
             </div>
           </div>

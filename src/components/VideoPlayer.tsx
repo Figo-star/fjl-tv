@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import Hls from 'hls.js';
 import {
   Play,
@@ -15,20 +15,35 @@ import {
   AlertTriangle,
   Server,
   ShieldCheck,
+  SkipForward,
+  RefreshCw,
+  X,
+  ExternalLink,
+  Info,
 } from 'lucide-react';
 import { StreamSource, MediaItem, PlaybackResolution } from '@/lib/types';
-import { saveWatchProgress } from '@/lib/storage';
+import { saveWatchProgress, getProgressForMedia, resetProgress } from '@/lib/storage';
 
 interface VideoPlayerProps {
   media: MediaItem;
   resolution: PlaybackResolution;
   initialSeason?: number;
   initialEpisode?: number;
+  nextEpisodeUrl?: string;
+  nextEpisodeTitle?: string;
 }
 
-export default function VideoPlayer({ media, resolution, initialSeason, initialEpisode }: VideoPlayerProps) {
+export default function VideoPlayer({
+  media,
+  resolution,
+  initialSeason,
+  initialEpisode,
+  nextEpisodeUrl,
+  nextEpisodeTitle,
+}: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   const hlsRef = useRef<Hls | null>(null);
 
   const [activeSource, setActiveSource] = useState<StreamSource | null>(resolution.activeSource);
@@ -46,12 +61,146 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [qualities, setQualities] = useState<{ id: number; height: number; bitrate: number }[]>([]);
   const [currentQuality, setCurrentQuality] = useState<number>(-1);
-  const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [showCountdown, setShowCountdown] = useState(false);
+  const [countdownSeconds, setCountdownSeconds] = useState(5);
 
+  // Resume prompt state
+  const [showResumeModal, setShowResumeModal] = useState(false);
+  const [savedResumeTime, setSavedResumeTime] = useState(0);
+
+  const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const formatTime = (secs: number) => {
+    if (isNaN(secs) || secs < 0) return '0:00';
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  };
+
+  // Check saved progress on mount or content change
+  useEffect(() => {
+    const saved = getProgressForMedia(media.id, media.mediaType, initialSeason, initialEpisode);
+    // Ignore negligible progress (< 15s) or near completed (> 95% of duration)
+    if (saved && saved.timestamp >= 15) {
+      if (!saved.duration || saved.timestamp < saved.duration * 0.95) {
+        setSavedResumeTime(saved.timestamp);
+        setShowResumeModal(true);
+      }
+    } else {
+      setShowResumeModal(false);
+    }
+  }, [media.id, media.mediaType, initialSeason, initialEpisode]);
+
+  // Handle postMessage progress tracking from supported embed players (e.g., VidLink Pro)
+  useEffect(() => {
+    const handleMessage = (e: MessageEvent) => {
+      // Validate trusted origins
+      if (
+        typeof e.origin === 'string' &&
+        (e.origin.includes('vidlink.pro') || e.origin.includes('videasy.to'))
+      ) {
+        try {
+          const data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+          if (data && typeof data === 'object') {
+            if (data.type === 'MEDIA_DATA' || data.event === 'timeupdate') {
+              const cur = Number(data.currentTime || data.time || 0);
+              const dur = Number(data.duration || 0);
+              if (cur > 0) {
+                setCurrentTime(cur);
+                if (dur > 0) setDuration(dur);
+                saveWatchProgress({
+                  mediaId: media.id,
+                  mediaType: media.mediaType,
+                  title: media.title,
+                  poster: media.poster,
+                  seasonNumber: initialSeason,
+                  episodeNumber: initialEpisode,
+                  timestamp: Math.floor(cur),
+                  duration: Math.floor(dur),
+                });
+              }
+            }
+          }
+        } catch {
+          // Ignore unrelated or non-JSON messages
+        }
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [media.id, media.mediaType, media.title, media.poster, initialSeason, initialEpisode]);
+
+  // Handle native video time updates
+  const handleTimeUpdate = useCallback(() => {
+    if (!videoRef.current) return;
+    const curr = videoRef.current.currentTime;
+    const dur = videoRef.current.duration || 0;
+    setCurrentTime(curr);
+    setDuration(dur);
+
+    // Save periodically
+    if (Math.floor(curr) % 5 === 0 && dur > 0) {
+      saveWatchProgress({
+        mediaId: media.id,
+        mediaType: media.mediaType,
+        title: media.title,
+        poster: media.poster,
+        seasonNumber: initialSeason,
+        episodeNumber: initialEpisode,
+        timestamp: Math.floor(curr),
+        duration: Math.floor(dur),
+      });
+    }
+
+    // End of episode auto-countdown
+    if (nextEpisodeUrl && dur > 30 && dur - curr <= 15 && !showCountdown) {
+      setShowCountdown(true);
+      setCountdownSeconds(10);
+      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = setInterval(() => {
+        setCountdownSeconds((prev) => {
+          if (prev <= 1) {
+            if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+            if (nextEpisodeUrl) window.location.href = nextEpisodeUrl;
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+  }, [media.id, media.mediaType, media.title, media.poster, initialSeason, initialEpisode, nextEpisodeUrl, showCountdown]);
+
+  // Save progress on pause or unmount
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (videoRef.current && videoRef.current.currentTime > 5) {
+        saveWatchProgress({
+          mediaId: media.id,
+          mediaType: media.mediaType,
+          title: media.title,
+          poster: media.poster,
+          seasonNumber: initialSeason,
+          episodeNumber: initialEpisode,
+          timestamp: Math.floor(videoRef.current.currentTime),
+          duration: Math.floor(videoRef.current.duration || 0),
+        });
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      handleBeforeUnload();
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [media.id, media.mediaType, media.title, media.poster, initialSeason, initialEpisode]);
+
+  // Initialize playback on active source change
   useEffect(() => {
     if (!activeSource) {
       setHasError(true);
-      setErrorMessage(resolution.unavailabilityReason || 'No playback source available.');
+      setErrorMessage(resolution.unavailabilityReason || 'Playback is currently unavailable for this title.');
       return;
     }
 
@@ -59,7 +208,7 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
     setErrorMessage('');
     setQualities([]);
 
-    // If source is an embedded player, video tag logic is bypassed
+    // If source is an iframe embed, destroy HLS and let iframe handle display
     if (activeSource.type === 'embed') {
       if (hlsRef.current) {
         hlsRef.current.destroy();
@@ -89,18 +238,29 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
         hls.attachMedia(video);
 
         hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
-          setQualities(data.levels.map((lvl, index) => ({
-            id: index,
-            height: lvl.height,
-            bitrate: lvl.bitrate,
-          })));
+          setQualities(
+            data.levels.map((lvl, index) => ({
+              id: index,
+              height: lvl.height,
+              bitrate: lvl.bitrate,
+            }))
+          );
           video.play().catch(() => setIsPlaying(false));
         });
 
         hls.on(Hls.Events.ERROR, (event, data) => {
           if (data.fatal) {
-            setHasError(true);
-            setErrorMessage(`Playback error encountered on ${activeSource.name}. Please select an alternate stream server.`);
+            console.warn(`HLS fatal error on ${activeSource.name}:`, data.type, data.details);
+            // Automatic seamless failover to next provider if available
+            const currentIndex = resolution.availableSources.findIndex((s) => s.id === activeSource.id);
+            if (currentIndex !== -1 && currentIndex + 1 < resolution.availableSources.length) {
+              const nextSource = resolution.availableSources[currentIndex + 1];
+              console.log(`Failing over to ${nextSource.name}...`);
+              setActiveSource(nextSource);
+            } else {
+              setHasError(true);
+              setErrorMessage(`Playback error encountered on ${activeSource.name}. Please select an alternate stream server.`);
+            }
           }
         });
 
@@ -119,27 +279,51 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+      }
     };
-  }, [activeSource, resolution.unavailabilityReason]);
+  }, [activeSource, resolution.availableSources, resolution.unavailabilityReason]);
 
-  const handleTimeUpdate = () => {
-    if (!videoRef.current) return;
-    const curr = videoRef.current.currentTime;
-    const dur = videoRef.current.duration || 0;
-    setCurrentTime(curr);
-    setDuration(dur);
+  // Resume Action: Restore to saved timestamp
+  const handleResume = () => {
+    setShowResumeModal(false);
+    if (activeSource?.type === 'hls' && videoRef.current) {
+      videoRef.current.currentTime = savedResumeTime;
+      setCurrentTime(savedResumeTime);
+      videoRef.current.play().catch(() => {});
+      setIsPlaying(true);
+    } else if (activeSource?.type === 'embed' && iframeRef.current) {
+      // Send seek command to iframe if supported
+      try {
+        iframeRef.current.contentWindow?.postMessage(
+          JSON.stringify({ type: 'SEEK', time: savedResumeTime }),
+          '*'
+        );
+      } catch {
+        // Embed controls own resume
+      }
+    }
+  };
 
-    if (Math.floor(curr) % 5 === 0 && dur > 0) {
-      saveWatchProgress({
-        mediaId: media.id,
-        mediaType: media.mediaType,
-        title: media.title,
-        poster: media.poster,
-        seasonNumber: initialSeason,
-        episodeNumber: initialEpisode,
-        timestamp: Math.floor(curr),
-        duration: Math.floor(dur),
-      });
+  // Start From Beginning Action: Resets position and removes progress
+  const handleStartFromBeginning = () => {
+    setShowResumeModal(false);
+    resetProgress(media.id, initialSeason, initialEpisode);
+    setCurrentTime(0);
+    if (activeSource?.type === 'hls' && videoRef.current) {
+      videoRef.current.currentTime = 0;
+      videoRef.current.play().catch(() => {});
+      setIsPlaying(true);
+    } else if (activeSource?.type === 'embed' && iframeRef.current) {
+      try {
+        iframeRef.current.contentWindow?.postMessage(
+          JSON.stringify({ type: 'SEEK', time: 0 }),
+          '*'
+        );
+      } catch {
+        // Embed controls own resume
+      }
     }
   };
 
@@ -214,70 +398,117 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
     }, 3500);
   };
 
-  const formatTime = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = Math.floor(secs % 60);
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
-  };
+  const remainingTime = Math.max(0, duration - currentTime);
 
   return (
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
-      className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden shadow-2xl border border-white/10 select-none group"
+      className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden shadow-2xl border border-white/10 select-none group focus:outline-none"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === ' ' || e.key === 'k') {
+          e.preventDefault();
+          togglePlay();
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          skipTime(10);
+        } else if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          skipTime(-10);
+        } else if (e.key === 'f') {
+          e.preventDefault();
+          toggleFullscreen();
+        } else if (e.key === 'm') {
+          e.preventDefault();
+          toggleMute();
+        }
+      }}
     >
-      {/* Top Header Controls / Server Switcher Bar */}
+      {/* Top Header Bar / Server Switcher */}
       <div className="absolute top-4 left-4 right-4 z-20 flex items-center justify-between pointer-events-auto">
         <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-black/75 backdrop-blur-md text-emerald-400 border border-emerald-500/30 shadow-md">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            Verified Source
-          </span>
+          {activeSource?.isAdFree ? (
+            <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-black/80 backdrop-blur-md text-emerald-400 border border-emerald-500/30 shadow-md">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              Verified Ad-Free Direct Stream
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-black/80 backdrop-blur-md text-amber-400 border border-amber-500/30 shadow-md">
+              <ExternalLink className="w-3.5 h-3.5" />
+              Embedded Player
+            </span>
+          )}
+
           {activeSource && (
-            <span className="text-xs text-slate-300 px-3 py-1 rounded-full bg-black/65 backdrop-blur-md border border-white/10 hidden sm:inline-block">
+            <span className="text-xs text-slate-300 px-3 py-1 rounded-full bg-black/70 backdrop-blur-md border border-white/10 hidden sm:inline-block">
               {activeSource.name}
+            </span>
+          )}
+
+          {activeSource?.adWarning && (
+            <span className="text-[11px] text-amber-300/90 px-2.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/20 hidden md:inline-block">
+              ⚠️ {activeSource.adWarning}
             </span>
           )}
         </div>
 
         {/* Server Picker Dropdown Button */}
-        <div className="relative">
-          <button
-            type="button"
-            onClick={() => setShowServerPicker(!showServerPicker)}
-            id="server-picker-button"
-            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-black/75 hover:bg-black/90 border border-white/15 text-xs font-semibold text-slate-200 transition-colors shadow-lg"
-          >
-            <Server className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Servers ({resolution.availableSources.length})</span>
-          </button>
+        {resolution.availableSources.length > 1 && (
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowServerPicker(!showServerPicker)}
+              id="server-picker-button"
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-black/80 hover:bg-black/95 border border-white/20 text-xs font-semibold text-slate-200 transition-colors shadow-lg"
+            >
+              <Server className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Servers ({resolution.availableSources.length})</span>
+            </button>
 
-          {showServerPicker && (
-            <div className="absolute right-0 top-10 z-30 p-2 rounded-xl glass-panel w-56 space-y-1 shadow-2xl">
-              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 px-2">Select Server Source</div>
-              {resolution.availableSources.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => {
-                    setActiveSource(s);
-                    setShowServerPicker(false);
-                  }}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-xs font-medium flex items-center justify-between transition-colors ${
-                    activeSource && s.id === activeSource.id ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30' : 'text-slate-200 hover:bg-white/5'
-                  }`}
-                >
-                  <span className="line-clamp-1">{s.name}</span>
-                  <span className="text-[10px] text-slate-400 ml-2">{s.quality}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+            {showServerPicker && (
+              <div className="absolute right-0 top-10 z-30 p-2 rounded-xl glass-panel w-72 space-y-1 shadow-2xl border border-white/15">
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 px-2">
+                  Select Playback Server
+                </div>
+                {resolution.availableSources.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => {
+                      setActiveSource(s);
+                      setShowServerPicker(false);
+                    }}
+                    className={`w-full text-left px-3 py-2.5 rounded-lg text-xs font-medium flex flex-col gap-0.5 transition-colors ${
+                      activeSource && s.id === activeSource.id
+                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                        : 'text-slate-200 hover:bg-white/5 border border-transparent'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between w-full">
+                      <span className="font-semibold line-clamp-1">{s.name}</span>
+                      <span className="text-[10px] text-slate-400 font-mono ml-2">{s.quality}</span>
+                    </div>
+                    <div className="flex items-center gap-1 text-[10px] text-slate-400">
+                      {s.isAdFree ? (
+                        <span className="text-emerald-400 font-medium">✓ Zero Ads</span>
+                      ) : (
+                        <span className="text-amber-400/90">⚠️ Sponsor Ads / Tabs</span>
+                      )}
+                      <span>·</span>
+                      <span>{s.supportsProgressTracking ? 'Tracks Resume' : 'Player controls resume'}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Embedded Player Source (Iframe with sandbox security) */}
+      {/* Embedded Player (Iframe) */}
       {activeSource && activeSource.type === 'embed' && (
         <iframe
+          ref={iframeRef}
           src={activeSource.url}
           title={media.title}
           className="w-full h-full border-0"
@@ -286,7 +517,7 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
         />
       )}
 
-      {/* Native / HLS Player */}
+      {/* HTML5 / HLS Native Video Player */}
       {activeSource && activeSource.type !== 'embed' && (
         <video
           ref={videoRef}
@@ -299,11 +530,71 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
         />
       )}
 
-      {/* Honest Error / Unavailable State */}
+      {/* Embedded Player Notice Banner (Bottom) */}
+      {activeSource && activeSource.type === 'embed' && (
+        <div className="absolute bottom-3 left-4 right-4 z-10 pointer-events-none flex items-center justify-between text-[11px] text-slate-400 bg-black/85 backdrop-blur-md px-3.5 py-1.5 rounded-xl border border-white/10">
+          <div className="flex items-center gap-2">
+            <Info className="w-3.5 h-3.5 text-cyan-400 flex-shrink-0" />
+            <span>
+              {activeSource.supportsProgressTracking
+                ? 'Accurate progress is synchronized with FJL TV history via player events.'
+                : 'Resume is controlled by this player.'}
+            </span>
+          </div>
+          {activeSource.adWarning && (
+            <span className="text-amber-400 hidden sm:inline">{activeSource.adWarning}</span>
+          )}
+        </div>
+      )}
+
+      {/* Continue Watching / Resume Prompt Modal */}
+      {showResumeModal && (
+        <div className="absolute inset-0 z-40 bg-black/85 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center animate-in fade-in duration-200">
+          <div className="glass-panel p-6 sm:p-8 rounded-3xl max-w-md w-full border border-cyan-500/30 shadow-2xl space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-cyan-500/20 border border-cyan-500/40 text-cyan-400 flex items-center justify-center mx-auto">
+              <RotateCcw className="w-6 h-6" />
+            </div>
+
+            <div>
+              <h3 className="text-lg font-bold text-white tracking-tight">Continue watching?</h3>
+              <p className="text-sm text-slate-300 mt-1">
+                You stopped at{' '}
+                <span className="font-mono text-cyan-400 font-bold">{formatTime(savedResumeTime)}</span>
+                {media.mediaType !== 'movie' && initialSeason && initialEpisode && (
+                  <span className="text-slate-400"> (S{initialSeason}:E{initialEpisode})</span>
+                )}
+                .
+              </p>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={handleResume}
+                className="flex-1 py-3 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20 transition-all hover:scale-[1.02]"
+              >
+                <Play className="w-4 h-4 fill-slate-950" />
+                Resume from {formatTime(savedResumeTime)}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleStartFromBeginning}
+                className="py-3 px-4 rounded-xl bg-white/10 hover:bg-white/20 text-white font-medium text-xs flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <RefreshCw className="w-3.5 h-3.5 text-slate-400" />
+                Start from beginning
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Honest Error / Unavailable State with Retry */}
       {hasError && (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center p-6 bg-slate-950/95 backdrop-blur-md text-center">
           <AlertTriangle className="w-12 h-12 text-amber-400 mb-3" />
-          <h3 className="text-lg font-bold text-white mb-1">Content Source Unavailable</h3>
+          <h3 className="text-lg font-bold text-white mb-1">Playback Error</h3>
           <p className="text-sm text-slate-300 max-w-md mb-6">{errorMessage}</p>
           <div className="flex gap-2 flex-wrap justify-center">
             {resolution.availableSources.map((s) => (
@@ -316,21 +607,55 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
                     : 'bg-white/10 hover:bg-white/20 text-white'
                 }`}
               >
-                Try {s.name}
+                Switch to {s.name}
               </button>
             ))}
           </div>
         </div>
       )}
 
-      {/* Overlay Controls for HTML5/HLS video sources */}
+      {/* Next Episode Auto-Play Countdown Overlay */}
+      {showCountdown && nextEpisodeUrl && (
+        <div className="absolute bottom-20 right-6 z-40 bg-black/90 backdrop-blur-md border border-cyan-500/40 p-4 rounded-2xl shadow-2xl flex items-center gap-4 animate-in fade-in duration-300">
+          <div className="flex flex-col">
+            <span className="text-[11px] font-bold text-cyan-400 uppercase tracking-wider">Next Episode</span>
+            <span className="text-xs text-white font-medium max-w-[180px] line-clamp-1">
+              {nextEpisodeTitle || 'Upcoming episode'}
+            </span>
+            <span className="text-[11px] text-slate-400 mt-0.5">Playing in {countdownSeconds}s</span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <a
+              href={nextEpisodeUrl}
+              className="px-3 py-1.5 rounded-xl bg-cyan-500 text-slate-950 text-xs font-bold hover:bg-cyan-400 transition-colors flex items-center gap-1"
+            >
+              <SkipForward className="w-3.5 h-3.5 fill-current" />
+              Play Now
+            </a>
+            <button
+              onClick={() => {
+                if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+                setShowCountdown(false);
+              }}
+              aria-label="Cancel auto-play"
+              className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-slate-400 hover:text-white transition-colors"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Overlay Controls for Direct HTML5/HLS Player */}
       {activeSource && activeSource.type !== 'embed' && (
         <div
-          className={`absolute inset-0 z-10 flex flex-col justify-end p-4 bg-gradient-to-t from-black/80 via-transparent to-transparent transition-opacity duration-300 ${
+          className={`absolute inset-0 z-10 flex flex-col justify-end p-4 bg-gradient-to-t from-black/85 via-black/20 to-transparent transition-opacity duration-300 ${
             showControls || !isPlaying ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
           }`}
         >
           <div className="space-y-2">
+            {/* Progress Timeline Scrubber */}
             <div className="relative w-full flex items-center">
               <input
                 type="range"
@@ -338,12 +663,14 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
                 max={duration || 100}
                 value={currentTime}
                 onChange={handleSeek}
+                aria-label="Seek timeline"
                 className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-cyan-400 hover:h-2.5 transition-all"
               />
             </div>
 
             <div className="flex items-center justify-between pt-1">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2.5 sm:gap-3">
+                {/* Play/Pause */}
                 <button
                   type="button"
                   onClick={togglePlay}
@@ -354,6 +681,18 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
                   {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
                 </button>
 
+                {/* Start From Beginning */}
+                <button
+                  type="button"
+                  onClick={handleStartFromBeginning}
+                  title="Start from beginning (resets progress)"
+                  aria-label="Start from beginning"
+                  className="p-1.5 text-slate-300 hover:text-cyan-400 transition-colors"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+
+                {/* Skip Controls */}
                 <button
                   type="button"
                   onClick={() => skipTime(-10)}
@@ -371,7 +710,8 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
                   <FastForward className="w-4 h-4" />
                 </button>
 
-                <div className="flex items-center gap-2">
+                {/* Volume Controls */}
+                <div className="flex items-center gap-1.5 sm:gap-2">
                   <button
                     type="button"
                     onClick={toggleMute}
@@ -387,19 +727,40 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
                     step={0.05}
                     value={isMuted ? 0 : volume}
                     onChange={handleVolumeChange}
+                    aria-label="Volume slider"
                     className="w-16 h-1 bg-white/20 rounded-lg appearance-none accent-cyan-400 cursor-pointer hidden sm:block"
                   />
                 </div>
 
-                <div className="text-xs text-slate-300 font-mono">
+                {/* Timestamp & Remaining Time */}
+                <div className="text-xs text-slate-300 font-mono flex items-center gap-1">
                   <span>{formatTime(currentTime)}</span>
-                  <span className="text-slate-500 mx-1">/</span>
+                  <span className="text-slate-500">/</span>
                   <span>{formatTime(duration)}</span>
+                  {duration > 0 && (
+                    <span className="text-[11px] text-slate-400 hidden md:inline-block ml-1.5">
+                      ({formatTime(remainingTime)} left)
+                    </span>
+                  )}
                 </div>
               </div>
 
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-1 text-xs">
+              <div className="flex items-center gap-2 sm:gap-3">
+                {/* Next Episode Button if series */}
+                {nextEpisodeUrl && (
+                  <a
+                    href={nextEpisodeUrl}
+                    title="Next Episode"
+                    aria-label="Next Episode"
+                    className="p-1.5 rounded-lg bg-white/10 hover:bg-cyan-500 hover:text-slate-950 text-white transition-colors flex items-center gap-1 text-xs font-semibold px-2.5"
+                  >
+                    <SkipForward className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Next Ep</span>
+                  </a>
+                )}
+
+                {/* Speed Switcher */}
+                <div className="flex items-center gap-1 text-xs hidden sm:flex">
                   {[1, 1.25, 1.5].map((spd) => (
                     <button
                       key={spd}
@@ -413,6 +774,7 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
                   ))}
                 </div>
 
+                {/* Quality Menu */}
                 {qualities.length > 0 && (
                   <div className="relative">
                     <button
@@ -451,6 +813,7 @@ export default function VideoPlayer({ media, resolution, initialSeason, initialE
                   </div>
                 )}
 
+                {/* Fullscreen */}
                 <button
                   type="button"
                   onClick={toggleFullscreen}

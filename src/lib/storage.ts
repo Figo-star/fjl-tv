@@ -14,14 +14,45 @@ export function getWatchProgress(): WatchProgress[] {
   }
 }
 
+export function getProgressForMedia(
+  mediaId: string,
+  mediaType: 'movie' | 'tv' | 'anime',
+  seasonNumber?: number,
+  episodeNumber?: number
+): WatchProgress | null {
+  const all = getWatchProgress();
+  if (mediaType === 'movie') {
+    return all.find((p) => p.mediaId === mediaId) || null;
+  }
+  return (
+    all.find(
+      (p) =>
+        p.mediaId === mediaId &&
+        p.seasonNumber === (seasonNumber || 1) &&
+        p.episodeNumber === (episodeNumber || 1)
+    ) || null
+  );
+}
+
 export function saveWatchProgress(progress: Omit<WatchProgress, 'updatedAt'>): void {
   if (typeof window === 'undefined') return;
   try {
-    const list = getWatchProgress().filter(p => p.mediaId !== progress.mediaId);
+    const list = getWatchProgress().filter((p) => {
+      if (progress.mediaType === 'movie') {
+        return p.mediaId !== progress.mediaId;
+      }
+      return !(
+        p.mediaId === progress.mediaId &&
+        p.seasonNumber === progress.seasonNumber &&
+        p.episodeNumber === progress.episodeNumber
+      );
+    });
+
     list.unshift({
       ...progress,
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     });
+
     localStorage.setItem(STORAGE_KEY_PROGRESS, JSON.stringify(list.slice(0, 30)));
     window.dispatchEvent(new Event('fjl_progress_updated'));
   } catch (err) {
@@ -29,15 +60,33 @@ export function saveWatchProgress(progress: Omit<WatchProgress, 'updatedAt'>): v
   }
 }
 
-export function removeWatchProgress(mediaId: string): void {
+export function removeWatchProgress(
+  mediaId: string,
+  seasonNumber?: number,
+  episodeNumber?: number
+): void {
   if (typeof window === 'undefined') return;
   try {
-    const list = getWatchProgress().filter(p => p.mediaId !== mediaId);
+    const list = getWatchProgress().filter((p) => {
+      if (seasonNumber !== undefined && episodeNumber !== undefined) {
+        return !(p.mediaId === mediaId && p.seasonNumber === seasonNumber && p.episodeNumber === episodeNumber);
+      }
+      return p.mediaId !== mediaId;
+    });
+
     localStorage.setItem(STORAGE_KEY_PROGRESS, JSON.stringify(list));
     window.dispatchEvent(new Event('fjl_progress_updated'));
   } catch (err) {
     console.error('Failed removing progress', err);
   }
+}
+
+export function resetProgress(
+  mediaId: string,
+  seasonNumber?: number,
+  episodeNumber?: number
+): void {
+  removeWatchProgress(mediaId, seasonNumber, episodeNumber);
 }
 
 export function getFavorites(): MediaItem[] {
@@ -55,10 +104,10 @@ export function toggleFavorite(media: MediaItem): boolean {
   if (typeof window === 'undefined') return false;
   try {
     const list = getFavorites();
-    const exists = list.some(m => m.id === media.id);
+    const exists = list.some((m) => m.id === media.id);
     let updated: MediaItem[];
     if (exists) {
-      updated = list.filter(m => m.id !== media.id);
+      updated = list.filter((m) => m.id !== media.id);
     } else {
       updated = [media, ...list];
     }
@@ -74,5 +123,5 @@ export function toggleFavorite(media: MediaItem): boolean {
 export function isFavorite(mediaId: string): boolean {
   if (typeof window === 'undefined') return false;
   const list = getFavorites();
-  return list.some(m => m.id === mediaId);
+  return list.some((m) => m.id === mediaId);
 }

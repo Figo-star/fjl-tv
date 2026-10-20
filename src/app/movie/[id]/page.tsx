@@ -72,7 +72,7 @@ export default async function MovieDetailPage({ params }: Props) {
               )}
               <span className="flex items-center gap-1 text-emerald-400">
                 <ShieldCheck className="w-3.5 h-3.5" />
-                HD Multi-Server Resolution
+                1080p Ad-Free Stream
               </span>
             </div>
 

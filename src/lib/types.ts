@@ -31,6 +31,9 @@ export interface StreamSource {
   quality: string;
   type: 'hls' | 'mp4' | 'embed';
   url: string;
+  adWarning?: string;
+  isAdFree?: boolean;
+  supportsProgressTracking?: boolean;
   isAuthorizedDemo?: boolean;
 }
 

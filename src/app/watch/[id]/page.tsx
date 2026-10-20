@@ -26,10 +26,17 @@ export default async function WatchPage({ params, searchParams }: Props) {
   const seasonNum = season ? parseInt(season, 10) : 1;
   const episodeNum = episode ? parseInt(episode, 10) : 1;
 
-  // Resolve authentic playback source for this specific title and episode
-  const resolution = PlaybackResolver.resolvePlayback(media.id, media.mediaType, seasonNum, episodeNum);
+  // Resolve authentic ad-free direct playback source for this specific title and episode
+  const resolution = await PlaybackResolver.resolvePlayback(media.id, media.mediaType, seasonNum, episodeNum);
   const episodes = media.mediaType !== 'movie' ? await MediaProvider.getEpisodes(id, seasonNum) : [];
   const currentEp = episodes.find((e) => e.seasonNumber === seasonNum && e.episodeNumber === episodeNum);
+
+  // Next episode calculation
+  const nextEp = episodes.find((e) => e.seasonNumber === seasonNum && e.episodeNumber === episodeNum + 1);
+  const nextEpisodeUrl = nextEp
+    ? `/watch/${media.id}?type=${media.mediaType}&season=${seasonNum}&episode=${episodeNum + 1}`
+    : undefined;
+  const nextEpisodeTitle = nextEp ? `Ep ${nextEp.episodeNumber}: ${nextEp.title}` : undefined;
 
   const backUrl = `/${media.mediaType === 'movie' ? 'movie' : media.mediaType === 'tv' ? 'tv' : 'anime'}/${media.id}`;
 
@@ -61,6 +68,8 @@ export default async function WatchPage({ params, searchParams }: Props) {
           resolution={resolution}
           initialSeason={seasonNum}
           initialEpisode={episodeNum}
+          nextEpisodeUrl={nextEpisodeUrl}
+          nextEpisodeTitle={nextEpisodeTitle}
         />
       </div>
 
